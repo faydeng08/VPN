@@ -1,0 +1,156 @@
+搭建 L2TP+IPSec VPN 环境
+
+*搭建一个L2TP+IPSec VPN环境，并测试该VPN网络是否能够正常通讯，具体要求如下：
+    使用L2TP协议创建一个支持身份验证与加密的隧道连接
+    使用IPSec对数据进行加密
+    为客户端分配192.168.3.0/24的地址池
+    客户端连接的用户名为：jacob，密码为：123456
+    预共享密钥为：randpass 
+
+主机列表
+虚拟机srv eth0 192.168.4.2/24
+         eth3 201.1.2.10/24
+win2008  网卡public2 201.1.2.20/24
+
+
+                        实验开始
+
+#####     步骤一：部署IPSec服务   ############
+
+1）安装软件包#############
+[root@client ~]# yum -y install libreswan
+
+2)新建IPSec密钥验证配置文件 ###########
+[root@client ~]# cat /etc/ipsec.conf                //仅查看一下该主配置文件(不需要修改)
+.. ..
+include /etc/ipsec.d/*.conf                    //加载该目录下的所有配置文件
+
+[root@client ~]cp /root/lnmp_soft/vpn/myipsec.conf /etc/ipsec.d/myipsec.conf //复制模板的配置文件
+[root@client ~]# vim /etc/ipsec.d/myipsec.conf   
+conn IDC-PSK-NAT
+    rightsubnet=vhost:%priv                        //允许建立的VPN虚拟网络
+    also=IDC-PSK-noNAT
+conn IDC-PSK-noNAT
+    authby=secret                                    //加密认证
+        ike=3des-sha1;modp1024                        //算法
+        phase2alg=aes256-sha1;modp2048                //算法
+    pfs=no
+    auto=add
+    keyingtries=3
+    rekey=no
+    ikelifetime=8h
+    keylife=3h
+    type=transport
+    left=201.1.2.10                                //修改为本机的ip
+    leftprotoport=17/1701
+    right=%any                                    //允许任何客户端连接
+    rightprotoport=17/%any
+
+
+3)创建IPSec预定义共享密钥 ##############
+[root@client ~]# cat /etc/ipsec.secrets                 //仅查看，不要修改该文件
+include /etc/ipsec.d/*.secrets
+
+[root@client ~]# vim /etc/ipsec.d/mypass.secrets        //需要新建,以.secrets结尾即可
+201.1.2.10   %any:    PSK    "randpass"             //randpass预共享密钥
+
+4)启动IPSec服务  ###############
+[root@client ~]# systemctl start ipsec        
+[root@client ~]# netstat -ntulp |grep pluto
+udp        0      0 127.0.0.1:4500          0.0.0.0:*           3148/pluto          
+udp        0      0 192.168.4.10:4500      0.0.0.0:*           3148/pluto          
+udp        0      0 201.1.2.10:4500         0.0.0.0:*           3148/pluto          
+udp        0      0 127.0.0.1:500           0.0.0.0:*           3148/pluto          
+udp        0      0 192.168.4.10:500       0.0.0.0:*           3148/pluto          
+udp        0      0 201.1.2.10:500          0.0.0.0:*           3148/pluto          
+udp6       0      0 ::1:500                 :::*                 3148/pluto
+
+
+
+##############  步骤二：部署XL2TP服务  #############
+1）安装软件包（预先准备软件包lnmp_soft）################
+[root@client ~]# yum localinstall xl2tpd-1.3.8-2.el7.x86_64.rpm 
+
+
+2) 修改xl2tp配置文件（修改3个配置文件的内容）################
+[root@client ~]#  vim  /etc/xl2tpd/xl2tpd.conf                //修改主配置文件
+[global]
+.. ..    
+[lns default]
+.. ..
+ip range = 192.168.3.128-192.168.3.254                    //分配给客户端的IP池
+local ip = 201.1.2.10                                    //VPN服务器的IP地址
+[root@client ~]# vim /etc/ppp/options.xl2tpd            //认证配置
+require-mschap-v2                                         //添加一行，强制要求认证
+#crtscts                                                //注释或删除该行
+#lock                                                //注释或删除该行
+
+[root@client ~]# vim /etc/ppp/chap-secrets                    //修改密码文件
+jacob   *       123456  *                //账户名称   服务器标记   密码   客户端IP
+
+
+3）启动服务#############
+[root@client ~]# systemctl start xl2tpd
+[root@client ~]# netstat  -ntulp |grep xl2tpd     //查看程序状态
+udp     0      0 0.0.0.0:1701      0.0.0.0:*          3580/xl2tpd
+
+4）设置路由转发，防火墙############
+[root@client ~]# echo "1" > /proc/sys/net/ipv4/ip_forward
+[root@client ~]# firewall-cmd --set-default-zone=trusted
+
+
+#########  win2008客户机验证  ##########
+win2008  网卡public2  ,地址201.1.2.20/24
+
+1. 设置Windows注册表（不修改注册表，连接VPN默认会报789错误），具体操作如下：
+
+    单击"开始"，单击"运行"，键入"regedit"，然后单击"确定"
+    找到下面的注册表子项，然后单击它：
+    HKEY_LOCAL_MACHINE\ System\CurrentControlSet\Services\Rasman\Parameters
+    在"编辑"菜单上，单击"新建"->"DWORD值"
+    在"名称"框中，键入"ProhibitIpSec"
+    在"数值数据"框中，键入"1"，然后单击"确定"
+    退出注册表编辑器，然后重新启动计算机
+
+2.创建新的网络链接 配置步骤
+桌面 - 网络(右键 -属性)
+更改网络设置:
+设置新的链接或网络 √
+链接到网络
+疑难解答
+
+设置新的链接或网络 
+(设置无线/宽带/拨号/临时或vpn链接;或设置路由器或访问点)
+链接到internet
+链接到工作区 √ 下一步
+设置拨号链接
+
+下一步
+你想如何链接?
+使用我的internet 链接(vpn)(I) √
+直接拨号
+
+你想在继续之前设置internet 链接吗?
+设置internet 链接
+我将稍后设置internet链接(i) √
+
+键入要链接的internet 地址
+(网络管理员可提供此地址)
+internet 地址(i) 201.1.2.5  (填写)
+目标名称(E) :VPN链接 (随便写,可中文)
+下一步
+键入您的用户名和密码
+用户名u:jacob
+密码:123456
+√记住密码
+创建  -  关闭
+
+桌面 - 网络(右键 -属性)
+更改适配器设置
+VIP链接 -右键-安全选使用第2层,填写共享秘钥randpass
+链接
+
+
+
+
+
